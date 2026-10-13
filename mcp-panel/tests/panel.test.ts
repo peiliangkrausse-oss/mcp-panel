@@ -12,17 +12,20 @@ const LIST = [
 ].join('\n')
 
 // Stands in for the engine: three servers, pdfcraft turned off for this folder.
-const machine = (on: On, opened: string[] = []) => {
+const machine = (on: On, opened: string[] = [], execPath: string | null = '/bin/claude', runs: string[] = []) => {
   const ran: string[] = []
   on('session.start', (_$, e) => e as any)
-  on('env.get', (_$, e) => ({ value: e.name === 'HOME' ? '/h' : '/bin/claude' }))
+  on('env.get', (_$, e) => ({ value: e.name === 'HOME' ? '/h' : execPath ?? undefined }))
   on('clock.now', () => ({ value: 1_000 }))
   on('command.register', () => ({ value: undefined }))
   on('ui.open', (_$, e) => {
     opened.push(e.id)
     return { value: { isPlaced: true as const } }
   })
-  on('process.run', () => ({ value: { exitCode: 0, stdout: LIST, stderr: '' } }))
+  on('process.run', (_$, e) => {
+    runs.push(e.argv[0])
+    return { value: { exitCode: 0, stdout: LIST, stderr: '' } }
+  })
   on('tool.list', () => ({ value: [{ name: 'mcp__blender__render', description: '', mcp: true }, { name: 'mcp__blender__scene', description: '', mcp: true }, { name: 'Read', description: '', mcp: false }] }))
   on('fs.read', () => ({ value: JSON.stringify({ projects: { '/w': { disabledMcpServers: ['pdfcraft'] } } }) }))
   on('command.run', { command: 'mcp' }, (_$, e) => {
@@ -60,6 +63,21 @@ test('shows cards, retries a broken server and turns one on', async ($, on) => {
   await ui.press({ key: 'toggle-pdfcraft' })
   await ui.press({ key: 'refresh' })
   expect(ran).toEqual(['reconnect unreal', 'enable pdfcraft'])
+})
+
+test('finds the desktop app copy of claude when nothing is on PATH', async ($, on) => {
+  const app = '/h/Library/Application Support/Claude/claude-code'
+  const runs: string[] = []
+  machine(on, [], null, runs)
+  on('fs.list', (_$, e) => ({
+    value: e.path === app ? [{ name: '2.1.293', kind: 'dir' }, { name: '2.1.295', kind: 'dir' }] : [{ name: 'abc', kind: 'dir' }],
+  }) as any)
+  on('fs.exists', (_$, e) => ({ value: e.path === `${app}/2.1.295/abc/claude.app/Contents/MacOS/claude` }) as any)
+  await $.session.start({ cwd: '/w' } as any)
+  await $.command.run({ command: 'mcp-panel', args: '' })
+  const ui = await pane($)
+  expect(await ui.find({ type: 'Text', text: '2 tools' })).toBeDefined()
+  expect(runs[0]).toBe(`${app}/2.1.295/abc/claude.app/Contents/MacOS/claude`)
 })
 
 test('the footer MCP button opens the pane', async ($, on) => {

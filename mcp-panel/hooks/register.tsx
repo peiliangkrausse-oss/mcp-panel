@@ -75,11 +75,46 @@ const offList = async ($: EngineInterface): Promise<string[]> => {
   }
 }
 
+// Newest version first: "2.1.295" before "2.1.293".
+const byVersionDesc = (a: string, b: string) => {
+  const pa = a.split('.').map(Number)
+  const pb = b.split('.').map(Number)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pb[i] ?? 0) - (pa[i] ?? 0)
+    if (d) return d
+  }
+  return 0
+}
+
+// Where the claude program is. The desktop app keeps its own copy and sets no
+// PATH, so look in the usual install spots, then in the app's newest copy.
+const findClaude = async ($: EngineInterface): Promise<string> => {
+  const fromEnv = await $.env.get('CLAUDE_CODE_EXECPATH')
+  if (fromEnv) return fromEnv
+  const home = await $.env.get('HOME')
+  for (const path of [`${home}/.local/bin/claude`, '/opt/homebrew/bin/claude', '/usr/local/bin/claude']) {
+    if (await $.fs.exists(path)) return path
+  }
+  const base = `${home}/Library/Application Support/Claude/claude-code`
+  try {
+    const versions = (await $.fs.list(base)).filter(e => e.kind === 'dir').map(e => e.name).sort(byVersionDesc)
+    for (const version of versions) {
+      for (const build of (await $.fs.list(`${base}/${version}`)).filter(e => e.kind === 'dir')) {
+        const path = `${base}/${version}/${build.name}/claude.app/Contents/MacOS/claude`
+        if (await $.fs.exists(path)) return path
+      }
+    }
+  } catch {
+    // No desktop app copy; fall through.
+  }
+  return 'claude'
+}
+
 const check = async ($: EngineInterface) => {
   if ((await read($, boardAtom)).isChecking) return
   await set($, { isChecking: true, note: '' })
   try {
-    const cli = (await $.env.get('CLAUDE_CODE_EXECPATH')) ?? 'claude'
+    const cli = await findClaude($)
     const [listed, tools, off] = await Promise.all([
       $.process.run([cli, 'mcp', 'list'], { timeoutMs: 90_000 }),
       $.tool.list(),
