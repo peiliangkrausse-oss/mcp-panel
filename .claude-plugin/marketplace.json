@@ -1,0 +1,7 @@
+{
+  "name": "mcp-panel",
+  "owner": { "name": "peiliangkrausse-oss" },
+  "plugins": [
+    { "name": "mcp-panel", "source": "./mcp-panel", "description": "A side pane showing your MCP servers as cards: status, tool count, retry and on/off." }
+  ]
+}
