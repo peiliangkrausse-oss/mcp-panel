@@ -1,1 +1,1 @@
-{ "name": "mcp-panel", "version": "0.1.1", "description": "A side pane (/mcp-panel) showing your MCP servers as cards: status, tool count, retry and on/off.", "types": "./types/index.d.ts" }
+{"name": "mcp-panel", "version": "0.2.0", "description": "A side pane showing every MCP server and app connection as cards, grouped by what it is for, with problems on top and a retry button.", "types": "./types/index.d.ts"}

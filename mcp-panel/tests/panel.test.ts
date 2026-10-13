@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { iconFor, parseList } from '../hooks/register'
+import { fromTools, iconFor, kindFor, labelFor, nameFor, parseList } from '../hooks/register'
 
 const LIST = [
   'Checking MCP server health…',
@@ -47,16 +47,17 @@ test('reads each line of mcp list', () => {
   expect(iconFor('blender')).toBe('🧊')
 })
 
-test('shows cards, retries a broken server and turns one on', async ($, on) => {
+test('shows grouped rows, retries a broken server and turns one on', async ($, on) => {
   const ran = machine(on)
   await $.session.start({ cwd: '/w' } as any)
   await $.command.run({ command: 'mcp-panel', args: '' })
   const ui = await pane($)
 
-  expect(await ui.find({ type: 'Text', text: '2 tools' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Blender MCP' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '1 down' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: 'Off in this folder' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: 'ArtCraft' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Off' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Needs a look' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Helpers' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'Not running' })).toBeDefined()
 
   await ui.press({ key: 'retry-unreal' })
@@ -76,7 +77,7 @@ test('finds the desktop app copy of claude when nothing is on PATH', async ($, o
   await $.session.start({ cwd: '/w' } as any)
   await $.command.run({ command: 'mcp-panel', args: '' })
   const ui = await pane($)
-  expect(await ui.find({ type: 'Text', text: '2 tools' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Blender MCP' })).toBeDefined()
   expect(runs[0]).toBe(`${app}/2.1.295/abc/claude.app/Contents/MacOS/claude`)
 })
 
@@ -87,3 +88,25 @@ test('the footer MCP button opens the pane', async ($, on) => {
   await footer.press({ key: 'footer-mcp' })
   expect(opened).toEqual(['mcp-panel'])
 })
+
+test('names app servers from their tools', () => {
+  const byKey = fromTools([
+    { name: 'mcp__bc58dfc4-761f-40aa-a3ca-df44e8da788c__notion-search', mcp: true },
+    { name: 'mcp__reddit-ads__reddit_list_ads', mcp: true },
+    { name: 'Read', mcp: false },
+  ])
+  expect(Object.keys(byKey).length).toBe(2)
+  expect(nameFor('bc58dfc4-761f-40aa-a3ca-df44e8da788c', byKey['bc58dfc4-761f-40aa-a3ca-df44e8da788c'])).toBe('Notion')
+  expect(nameFor('google-ads-mcp', [])).toBe('google-ads-mcp')
+})
+
+test('friendly names land on the right shelf', () => {
+  expect(labelFor('google-ads-mcp')).toBe('Google Ads')
+  expect(labelFor('MCP_DOCKER')).toBe('Docker')
+  expect(kindFor('Google Ads')).toBe('Ads')
+  expect(kindFor('Notion')).toBe('Work tools')
+  expect(kindFor('n8n')).toBe('Automation')
+  expect(kindFor('Chrome')).toBe('Browser and screen')
+  expect(kindFor('Visualize')).toBe('Helpers')
+})
+

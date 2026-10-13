@@ -60,6 +60,63 @@ export const reasonFor = (status: string) => {
   return 'Down'
 }
 
+// Servers the Claude app hands the session itself never show in `mcp list`;
+// their tools still do. Its own window controls (ccd_*) are left out.
+const isAppInternal = (key: string) => /^ccd_/.test(key)
+const isId = (key: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(key)
+
+// A readable name for a server the app adds under an id, guessed from its tools.
+const NAMES: [RegExp, string][] = [
+  [/__notion-/, 'Notion'],
+  [/__ads_/, 'Meta Ads'],
+  [/__(get_my_tasks|create_project|get_portfolios)$/, 'Asana'],
+  [/__(show_widget|read_me)$/, 'Visualize'],
+  [/__(batch|guide|export)$/, 'Claude Docs'],
+]
+export const nameFor = (key: string, toolNames: string[]) => {
+  if (!isId(key)) return key.replace(/_/g, ' ')
+  return NAMES.find(([re]) => toolNames.some(t => re.test(t)))?.[1] ?? key
+}
+
+// Every MCP server the session has tools from, by its tool-name key.
+export const fromTools = (tools: { name: string; mcp: boolean }[]) => {
+  const byKey: Record<string, string[]> = {}
+  for (const t of tools) {
+    if (!t.mcp) continue
+    const key = t.name.split('__')[1] ?? ''
+    if (key) (byKey[key] ??= []).push(t.name)
+  }
+  return byKey
+}
+
+// The name a person knows a server by; the config key stays the one /mcp takes.
+const LABELS: [RegExp, string][] = [
+  [/^google[-_ ]?ads/i, 'Google Ads'],
+  [/^reddit[-_ ]?ads/i, 'Reddit Ads'],
+  [/^n8n/i, 'n8n'],
+  [/docker/i, 'Docker'],
+  [/^claude[-_ ]in[-_ ]chrome$/i, 'Chrome'],
+  [/^claude[-_ ]browser$/i, 'Claude browser'],
+  [/ios[-_ ]simulator/i, 'iPhone simulator'],
+  [/^scheduled[-_ ]tasks$/i, 'Scheduled tasks'],
+  [/^mcp[-_ ]registry$/i, 'Connector finder'],
+]
+export const labelFor = (name: string) => {
+  const found = LABELS.find(([re]) => re.test(name))?.[1]
+  if (found) return found
+  const plain = name.replace(/^claude\.ai /i, '').replace(/[_-]+/g, ' ').trim()
+  return plain.charAt(0).toUpperCase() + plain.slice(1)
+}
+
+// The shelf a server sits on, by what it is for. Order here is the order drawn.
+export const KINDS: { name: string; match: RegExp }[] = [
+  { name: 'Ads', match: /ads|meta|google|reddit|tiktok|linkedin/i },
+  { name: 'Work tools', match: /notion|asana|docs|slack|drive|gmail|mail|calendar|sheets/i },
+  { name: 'Automation', match: /n8n|schedul|docker|zapier|make/i },
+  { name: 'Browser and screen', match: /browser|chrome|simulator|terminal|computer/i },
+]
+export const kindFor = (label: string) => KINDS.find(k => k.match.test(label))?.name ?? 'Helpers'
+
 let cwd = ''
 
 const set = ($: EngineInterface, change: Partial<Board>) => update($, boardAtom, b => ({ ...b, ...change }))
@@ -120,19 +177,21 @@ const check = async ($: EngineInterface) => {
       $.tool.list(),
       offList($),
     ])
-    const counts: Record<string, number> = {}
-    for (const t of tools) {
-      if (!t.mcp) continue
-      const server = t.name.split('__')[1] ?? ''
-      counts[server] = (counts[server] ?? 0) + 1
-    }
-    const servers: Server[] = parseList(listed.stdout).map(s => ({
+    const byKey = fromTools(tools)
+    const configured: Server[] = parseList(listed.stdout).map(s => ({
       ...s,
-      tools: counts[toolKey(s.name)] ?? 0,
+      label: labelFor(s.name),
+      tools: byKey[toolKey(s.name)]?.length ?? 0,
       isOff: off.includes(s.name),
     }))
     // Newest first: `mcp list` prints servers in the order they were added.
-    servers.sort((a, b) => b.order - a.order)
+    configured.sort((a, b) => b.order - a.order)
+    const known = new Set(configured.map(s => toolKey(s.name)))
+    const fromApp: Server[] = Object.entries(byKey)
+      .filter(([key]) => !known.has(key) && !isAppInternal(key))
+      .map(([key, names], order) => ({ name: nameFor(key, names), label: labelFor(nameFor(key, names)), group: 'From the Claude app', order, health: 'ok' as const, detail: '', tools: names.length, isOff: false, fromApp: true }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+    const servers = [...configured, ...fromApp]
     await set($, {
       servers,
       checkedAt: await $.clock.now(),
@@ -170,6 +229,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     cwd = e.cwd
     const started = await next(e)
+    await set($, { isChecking: false, busy: '' })
     await $.command.register({ name: 'mcp-panel', description: 'Show your MCP servers as cards, with retry and on/off' })
 
     return started
@@ -185,7 +245,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'SessionMode' }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const board = await read($, boardAtom)
-    const down = board.servers.filter(s => s.health !== 'ok' && !s.isOff).length
+    const down = board.servers.filter(s => !s.isOff && (s.health !== 'ok' || (!s.fromApp && s.tools === 0))).length
 
     return (
       <Box flexDirection="row" gap={1} alignItems="center">
@@ -199,52 +259,55 @@ export const register: Register = on => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const board = await read($, boardAtom)
     const now = await $.clock.now()
+
+    const live = board.servers.filter(s => !s.isOff && s.health === 'ok' && (s.fromApp || s.tools > 0)).length
+    const down = board.servers.filter(s => !s.isOff && (s.health !== 'ok' || (!s.fromApp && s.tools === 0))).length
+    const ago = board.checkedAt ? Math.max(0, Math.round((now - board.checkedAt) / 60_000)) : -1
+
+    // Connected yet no tools in this chat counts as broken too: nothing here can use it.
+    const isBad = (s: Server) => !s.isOff && (s.health !== 'ok' || (!s.fromApp && s.tools === 0))
+    const why = (s: Server) => (s.health === 'auth' ? 'Sign in' : s.health !== 'ok' ? s.detail || 'Down' : 'Not working')
+
     const cols = (e.props.bodyColumns ?? 40) >= 60 ? 3 : 2
     const width = cols === 3 ? '31%' : '47%'
 
-    const live = board.servers.filter(s => s.health === 'ok' && !s.isOff).length
-    const down = board.servers.filter(s => s.health !== 'ok' && !s.isOff).length
-    const ago = board.checkedAt ? Math.max(0, Math.round((now - board.checkedAt) / 60_000)) : -1
-
+    // One small card per server: dot and name, plus what is wrong when something is.
     const card = (s: Server) => {
-      const isBad = !s.isOff && s.health !== 'ok'
-      const isBusy = board.busy === s.name
-      const status = s.isOff ? 'Off in this folder' : s.health === 'ok' ? `${s.tools} tools` : s.health === 'auth' ? 'Needs sign-in' : s.detail || 'Down'
+      const bad = isBad(s)
+      const note = board.busy === s.name ? 'Working…' : s.isOff ? 'Off' : bad ? why(s) : ''
 
       return (
-        <Box key={`card-${s.name}`} flexDirection="column" width={width} borderStyle="round" borderColor={isBad ? 'error' : undefined} borderDimColor={!isBad} paddingX={1}>
+        <Box key={`card-${s.name}`} flexDirection="column" width={width} borderStyle="round" borderColor={bad ? 'error' : undefined} borderDimColor={!bad} paddingX={1}>
           <Box flexDirection="row" gap={1}>
-            <Text>{iconFor(s.name)}</Text>
-            <Text bold dimColor={s.isOff} wrap="truncate-end">{s.name}</Text>
-            <Box flexGrow={1} />
-            <Text color={s.isOff ? 'inactive' : s.health === 'ok' ? 'success' : 'error'}>●</Text>
+            <Text color={s.isOff ? 'inactive' : bad ? 'error' : 'success'}>●</Text>
+            <Box flexShrink={1}>
+              <Text dimColor={s.isOff} wrap="wrap">{`${s.label ?? labelFor(s.name)} MCP`}</Text>
+            </Box>
           </Box>
-          <Text color={isBad ? 'error' : undefined} dimColor={!isBad} wrap="truncate-end">{isBusy ? 'Working…' : status}</Text>
-          <Box flexDirection="row" alignItems="center" justifyContent="space-between" marginTop={1}>
-            {isBad ? <Button key={`retry-${s.name}`} label="Retry" variant="primary" onPress={() => void act($, 'reconnect', s.name)} /> : <Box />}
-            <Button
-              key={`toggle-${s.name}`}
-              label={s.isOff ? 'Turn on' : 'Turn off'}
-              plain
-              dimColor={!s.isOff}
-              onPress={() => void act($, s.isOff ? 'enable' : 'disable', s.name)}
-            />
-          </Box>
+          {note ? <Text color={bad ? 'error' : undefined} dimColor={!bad} wrap="truncate-end">{note}</Text> : null}
+          {bad && !s.fromApp ? <Box marginTop={1}><Button key={`retry-${s.name}`} label="Retry" onPress={() => void act($, 'reconnect', s.name)} /></Box> : null}
+          {s.isOff ? <Box marginTop={1}><Button key={`toggle-${s.name}`} label="Turn on" plain onPress={() => void act($, 'enable', s.name)} /></Box> : null}
         </Box>
       )
     }
 
-    // Groups in the order of their newest server; cards inside stay newest first.
-    const groups: { name: string; servers: Server[] }[] = []
-    for (const s of board.servers) {
-      const found = groups.find(g => g.name === s.group)
-      if (found) found.servers.push(s)
-      else groups.push({ name: s.group, servers: [s] })
-    }
+    const list = (servers: Server[]) => (
+      <Box flexDirection="row" flexWrap="wrap" columnGap={1} rowGap={1}>
+        {servers.map(card)}
+      </Box>
+    )
+
+    // Broken ones first on their own shelf, then each kind in its set order, names A to Z.
+    const broken = board.servers.filter(isBad)
+    const healthy = board.servers.filter(s => !isBad(s))
+    const byName = (a: Server, b: Server) => (a.label ?? labelFor(a.name)).localeCompare(b.label ?? labelFor(b.name))
+    const shelves = [...KINDS.map(k => ({ name: k.name })), { name: 'Helpers' }]
+      .map(k => ({ ...k, servers: healthy.filter(s => kindFor(s.label ?? labelFor(s.name)) === k.name).sort(byName) }))
+      .filter(k => k.servers.length)
 
     return (
       <Box flexDirection="column" gap={1}>
-        <Box flexDirection="row" gap={1} alignItems="center">
+        <Box flexDirection="row" gap={2} alignItems="center">
           <Text color="success">{live} live</Text>
           <Text color={down ? 'error' : 'inactive'}>{down} down</Text>
           <Box flexGrow={1} />
@@ -253,17 +316,16 @@ export const register: Register = on => {
         </Box>
         {board.note ? <Text color="warning">{board.note}</Text> : null}
         {board.servers.length === 0 && board.isChecking ? <Text dimColor>Checking your servers… this takes a few seconds.</Text> : null}
-        {groups.map(g => (
-          <Box key={`group-${g.name}`} flexDirection="column" gap={1}>
-            <Box flexDirection="row" gap={1}>
-              <Text bold>{g.name}</Text>
-              <Text dimColor>
-                {g.servers.filter(s => s.health === 'ok' && !s.isOff).length}/{g.servers.length} live
-              </Text>
-            </Box>
-            <Box flexDirection="row" flexWrap="wrap" columnGap={1} rowGap={1}>
-              {g.servers.map(card)}
-            </Box>
+        {broken.length ? (
+          <Box key="group-broken" flexDirection="column" gap={1} marginTop={1}>
+            <Text bold color="error">Needs a look</Text>
+            {list(broken)}
+          </Box>
+        ) : null}
+        {shelves.map(k => (
+          <Box key={`group-${k.name}`} flexDirection="column" gap={1} marginTop={1}>
+            <Text bold dimColor>{k.name}</Text>
+            {list(k.servers)}
           </Box>
         ))}
       </Box>
